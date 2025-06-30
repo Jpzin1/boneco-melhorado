@@ -272,7 +272,7 @@ def evaluate_genomes(genomes, config):
         boneco = BonecoMelhorado(space, 100, HEIGHT - 150)
 
         # Simulação mais longa para aprendizado mais robusto
-        for step in range(600):  # 10 segundos a 60 FPS
+        for step in range(300):  # 10 segundos a 60 FPS
             inputs = boneco.get_state()
             actions = net.activate(inputs)
             
@@ -384,7 +384,7 @@ def run_neat():
     pop.add_reporter(checkpoint_reporter)
 
     # Executar evolução
-    winner = pop.run(evaluate_genomes, 100)  # Mais gerações para melhor aprendizado
+    winner = pop.run(evaluate_genomes, 50)  # Mais gerações para melhor aprendizado
 
     print("Treinamento finalizado. Abrindo visualização do vencedor...")
     test_winner_visual(winner, config)
