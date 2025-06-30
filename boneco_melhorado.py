@@ -106,7 +106,7 @@ class BonecoMelhorado:
             foot = pymunk.Body(1, pymunk.moment_for_box(1, (20, 8)))
             foot.position = x + side * 8, y + 95
             foot_shape = pymunk.Poly.create_box(foot, (20, 8))
-            foot_shape.friction = 1.0  # Mais atrito no pé
+            foot_shape.friction = 2.0  # Mais atrito no pé
             foot_shape.color = BLACK
             space.add(foot, foot_shape)
             
@@ -132,12 +132,13 @@ class BonecoMelhorado:
         self.energy_used = 0
         self.stability_penalty = 0
 
+    # Em boneco_melhorado.py, dentro da classe BonecoMelhorado
+
     def get_state(self):
         """Retorna o estado atual do boneco para a rede neural"""
-        # Detectar contato com o chão baseado na posição dos pés
-        ground_level = HEIGHT - 50
-        for i, foot in enumerate([self.legs[2], self.legs[5]]):  # Pés esquerdo e direito
-            self.ground_contact[i] = foot.position.y >= ground_level - 10
+        # O CÓDIGO DE DETECÇÃO MANUAL FOI REMOVIDO DAQUI.
+        # A variável self.ground_contact já está sendo atualizada
+        # automaticamente pelos handlers de colisão.
         
         # Posição e orientação do corpo
         body_x = (self.body.position.x - self.start_x) / 1000.0
@@ -169,7 +170,7 @@ class BonecoMelhorado:
             actions = list(actions) + [0] * (4 - len(actions))
         
         # Limitar as ações para evitar forças excessivas
-        max_torque = 50000
+        max_torque = 10000
         for i, motor in enumerate(self.motors):
             torque = max(-max_torque, min(max_torque, float(actions[i]) * max_torque))
             motor.rate = torque / 10000  # Converter para velocidade angular
@@ -181,28 +182,38 @@ class BonecoMelhorado:
         self.max_distance = max(self.max_distance, distance)
         return distance
 
-    def get_fitness(self):
+    def get_fitness(self, simulation_steps=0):
         """Calcula o fitness baseado em múltiplos critérios"""
         distance = self.get_distance()
         
-        # Penalidade por queda
-        # Penalidade por queda (mais severa)
-        fall_penalty = 0
-        if self.body.position.y > HEIGHT - 30:  # Se caiu
-            fall_penalty = 5000  # Aumentar a penalidade por queda
+        # 1. Recompensa baseada no tempo de sobrevivência (número de passos)
+        # Este é o incentivo mais importante para aprender a não cair.
+        survival_reward = simulation_steps * 0.5 # Aumente este multiplicador se necessário
+
+        # 2. Recompensa pela distância percorrida (seu objetivo principal)
+        distance_reward = distance * 2.0
+
+        # 3. Recompensa por manter o tronco ereto
+        # Use o cosseno do ângulo para recompensar ângulos próximos de zero.
+        stability_reward = math.cos(self.body.angle) * 150
+
+        # 4. Penalidade por uso de energia (para evitar movimentos espasmódicos)
+        energy_penalty = self.energy_used * 0.2
+
+        # 5. Penalidade por mover-se para trás
+        backward_penalty = 0
+        if distance < 0:
+            backward_penalty = abs(distance) * 3.0
+
+         # Fitness final
+        fitness = survival_reward + distance_reward + stability_reward - energy_penalty - backward_penalty
+
+         # Se cair, o fitness é drasticamente reduzido, mas não aniquilado.
+         # A recompensa de sobrevivência já foi acumulada até o ponto da queda.
+        if self.is_fallen():
+            fitness *= 0.1 # Penaliza, mas mantém parte do aprendizado
         
-        # Penalidade por instabilidade (ângulo do corpo muito inclinado)
-        stability_penalty = abs(self.body.angle) * 200  # Aumentar a penalidade de estabilidade
-        
-        # Recompensa por velocidade constante e para frente
-        velocity_reward = self.body.velocity.x * 2.0  # Recompensa direta pela velocidade X
-        
-        # Penalidade por uso excessivo de energia
-        energy_penalty = self.energy_used * 0.05  # Reduzir um pouco a penalidade de energia para permitir mais exploração
-        
-        # Fitness final
-        fitness = distance + velocity_reward - fall_penalty - stability_penalty - energy_penalty
-        return max(fitness, 0.1)
+        return max(fitness, 0.1) # Garante um fitness mínimo
 
     def is_fallen(self):
         """Verifica se o boneco caiu"""
@@ -262,6 +273,24 @@ def draw_info(screen, font, boneco, generation, genome_id, fps):
         screen.blit(surface, (10, 10 + i * 25))
 
 # --------- Avaliação Melhorada --------- #
+# Coloque estas funções de handler antes da função evaluate_genomes
+def begin_contact(arbiter, space, data):
+    boneco = data["boneco"]
+    # collision_type 1 é o pé esquerdo, 2 é o direito
+    shape_collision_type = arbiter.shapes[0].collision_type
+    if shape_collision_type in [1, 2]:
+        boneco.ground_contact[shape_collision_type - 1] = True
+    return True
+
+def separate_contact(arbiter, space, data):
+    boneco = data["boneco"]
+    shape_collision_type = arbiter.shapes[0].collision_type
+    if shape_collision_type in [1, 2]:
+        boneco.ground_contact[shape_collision_type - 1] = False
+    return True
+
+
+# Agora, a função evaluate_genomes modificada
 def evaluate_genomes(genomes, config):
     for genome_id, genome in genomes:
         genome.fitness = 0
@@ -271,20 +300,40 @@ def evaluate_genomes(genomes, config):
         create_ground(space)
         boneco = BonecoMelhorado(space, 100, HEIGHT - 150)
 
-        # Simulação mais longa para aprendizado mais robusto
-        for step in range(300):  # 10 segundos a 60 FPS
+        # --- MELHORIA 1: CONFIGURAR HANDLERS DE COLISÃO ---
+        # Isso torna a detecção de contato com o chão automática e robusta
+        handler_left = space.add_collision_handler(1, 0) # Pé esquerdo (tipo 1) com chão (tipo 0)
+        handler_left.data["boneco"] = boneco
+        handler_left.begin = begin_contact
+        handler_left.separate = separate_contact
+
+        handler_right = space.add_collision_handler(2, 0) # Pé direito (tipo 2) com chão (tipo 0)
+        handler_right.data["boneco"] = boneco
+        handler_right.begin = begin_contact
+        handler_right.separate = separate_contact
+        
+        # --- MELHORIA 2: CONTAR PASSOS DE SOBREVIVÊNCIA ---
+        steps_survived = 0
+        max_simulation_steps = 1200 # Aumente para dar mais tempo para andar (ex: 1800 = 30s)
+
+        for step in range(max_simulation_steps):
+            steps_survived += 1 # Incrementa a cada passo que o boneco não caiu
+
             inputs = boneco.get_state()
             actions = net.activate(inputs)
             
             boneco.apply_actions(actions)
             space.step(1 / 60.0)
 
-            # Parar se o boneco caiu
             if boneco.is_fallen():
                 break
 
-        genome.fitness = boneco.get_fitness()
-        print(f"[{genome_id}] Fitness: {genome.fitness:.2f}, Distância: {boneco.get_distance():.1f}")
+        # --- MELHORIA 3: PASSAR OS PASSOS PARA A FUNÇÃO DE FITNESS ---
+        # Certifique-se que sua função get_fitness() agora aceita este argumento: def get_fitness(self, simulation_steps):
+        genome.fitness = boneco.get_fitness(steps_survived)
+        
+        # Atualiza o print para vermos os passos, uma métrica importante
+        print(f"[{genome_id}] Fitness: {genome.fitness:.2f}, Distância: {boneco.get_distance():.1f}, Passos: {steps_survived}")
 
 # --------- Visualização Melhorada --------- #
 def test_winner_visual(winner, config):
@@ -384,7 +433,7 @@ def run_neat():
     pop.add_reporter(checkpoint_reporter)
 
     # Executar evolução
-    winner = pop.run(evaluate_genomes, 50)  # Mais gerações para melhor aprendizado
+    winner = pop.run(evaluate_genomes, 100)  # Mais gerações para melhor aprendizado
 
     print("Treinamento finalizado. Abrindo visualização do vencedor...")
     test_winner_visual(winner, config)
